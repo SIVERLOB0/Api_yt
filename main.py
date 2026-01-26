@@ -3,49 +3,75 @@ from flask_cors import CORS
 import yt_dlp
 
 app = Flask(__name__)
-CORS(app) # Permite que tu bot Node.js le hable a este servidor
+CORS(app)
 
-print("🐺 WOLF API (PYTHON ENGINE) INICIANDO...")
+print("🐺 WOLF API (PYTHON ENGINE) MULTIMEDIA: INICIANDO...")
 
 @app.route('/')
 def home():
-    return "🐺 WOLF API PYTHON: ACTIVO Y LISTO."
+    return "🐺 WOLF API: READY FOR ALL PLATFORMS."
 
-@app.route('/ytmp3', methods=['GET'])
-def descargar_mp3():
-    video_url = request.args.get('url')
+@app.route('/download', methods=['GET'])
+def descargar_media():
+    url = request.args.get('url')
+    tipo = request.args.get('type', 'video') # Por defecto descarga video, si quieres audio envía ?type=audio
     
-    if not video_url:
+    if not url:
         return jsonify({"status": False, "error": "Falta la URL"}), 400
 
-    print(f"📥 Procesando: {video_url}")
+    print(f"📥 Wolf procesando [{tipo}]: {url}")
 
-    # Configuración de yt-dlp para obtener el link directo
+    # Configuración inteligente
     ydl_opts = {
-        'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
-        'dump_single_json': True, # Esto nos da la info sin descargar el archivo al disco
-        'extract_flat': False
+        'dump_single_json': True, 
+        'extract_flat': False,
+        # Opciones para evadir algunos bloqueos simples
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        # User Agent genérico para que TikTok/FB no nos detecten tan rápido como bot
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
+
+    # Lógica de selección de formato
+    if tipo == 'audio':
+        # Si pide audio, buscamos el mejor audio posible
+        ydl_opts['format'] = 'bestaudio/best'
+    else:
+        # Si es video, priorizamos MP4 para compatibilidad con WhatsApp/Web
+        # Si no hay mp4, baja el mejor disponible
+        ydl_opts['format'] = 'best[ext=mp4]/best'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+            # 1. Extraemos la info sin descargar
+            info = ydl.extract_info(url, download=False)
             
-            # Extraemos lo que nos interesa
-            titulo = info.get('title', 'Audio Desconocido')
-            url_directa = info.get('url', None) # El link mágico directo a Google
+            # 2. Manejo de casos donde el link es una playlist o un reel complejo
+            if 'entries' in info:
+                # Tomamos el primer video si es una lista/feed
+                info = info['entries'][0]
+
+            titulo = info.get('title', 'Video Wolf')
+            url_directa = info.get('url', None)
             thumbnail = info.get('thumbnail', '')
             duracion = info.get('duration_string', '')
+            plataforma = info.get('extractor_key', 'Desconocida')
+
+            # Verificación extra por si la URL está escondida
+            if not url_directa and 'requested_formats' in info:
+                url_directa = info['requested_formats'][0]['url']
 
             if not url_directa:
-                return jsonify({"status": False, "error": "No se pudo extraer el link"}), 500
+                return jsonify({"status": False, "error": "No se pudo extraer el enlace directo"}), 500
 
             return jsonify({
                 "status": True,
                 "resultado": {
                     "titulo": titulo,
+                    "plataforma": plataforma,
+                    "tipo": tipo,
                     "descarga": url_directa,
                     "imagen": thumbnail,
                     "duracion": duracion
@@ -53,9 +79,8 @@ def descargar_mp3():
             })
 
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print(f"❌ Error Wolf: {str(e)}")
         return jsonify({"status": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Ejecutamos en el puerto 5000
     app.run(host='0.0.0.0', port=5000)
