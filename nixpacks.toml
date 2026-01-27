@@ -1,8 +1,9 @@
 [phases.setup]
-nixPkgs = ["python3", "ffmpeg", "gcc"]
+# AQUÍ ESTÁ EL CAMBIO: Agregamos "python3Packages.pip" explícitamente
+nixPkgs = ["python3", "python3Packages.pip", "ffmpeg", "gcc"]
 
 [phases.install]
-# CAMBIO CLAVE AQUÍ: Usamos 'python3 -m pip' en vez de solo 'pip'
+# Ahora sí, invocamos a pip a través de python3
 cmds = ["python3 -m pip install -r requirements.txt"]
 
 [start]
