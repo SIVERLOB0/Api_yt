@@ -1,78 +1,92 @@
 import os
-from flask import Flask, request, jsonify, Response, stream_with_context
+import uuid
+import time
+import threading
+import glob
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
-import requests
 
 app = Flask(__name__)
 CORS(app)
 
-print("🐺 WOLF API (TUNNEL ENGINE): ONLINE...")
+# Carpeta temporal para guardar los videos
+DOWNLOAD_FOLDER = 'downloads'
+if not os.path.exists(DOWNLOAD_FOLDER):
+    os.makedirs(DOWNLOAD_FOLDER)
+
+print("🐺 WOLF API (STORAGE MODE): ONLINE...")
+
+# --- SISTEMA DE AUTO-LIMPIEZA (Borra archivos de más de 10 min) ---
+def limpiar_basura():
+    while True:
+        try:
+            now = time.time()
+            # Busca todos los archivos en la carpeta downloads
+            files = glob.glob(os.path.join(DOWNLOAD_FOLDER, '*'))
+            for f in files:
+                # Si el archivo tiene más de 600 segundos (10 min)
+                if os.stat(f).st_mtime < now - 600:
+                    os.remove(f)
+                    print(f"🗑️ Archivo borrado por vejez: {f}")
+        except Exception as e:
+            print(f"Error en limpieza: {e}")
+        time.sleep(600) # Revisa cada 10 minutos
+
+# Iniciamos el basurero en segundo plano
+threading.Thread(target=limpiar_basura, daemon=True).start()
+
 
 @app.route('/')
 def home():
-    return "🐺 WOLF API: PROXY TUNNEL READY."
+    return "🐺 WOLF API: STORAGE SERVER READY."
 
-# --- ENDPOINT 1: EXTRACTOR (Obtiene la Info y el Link Real) ---
-@app.route('/download', methods=['GET'])
-def get_info():
+# --- ENDPOINT 1: PROCESAR Y GUARDAR ---
+@app.route('/process', methods=['GET'])
+def process_media():
     url = request.args.get('url')
     tipo = request.args.get('type', 'video') # 'video' o 'audio'
     
-    if not url:
-        return jsonify({"status": False, "error": "Falta parametro url"}), 400
+    if not url: return jsonify({"status": False, "error": "Falta URL"}), 400
 
-    print(f"📥 Procesando: {url} [{tipo}]")
+    print(f"📥 Descargando localmente: {url}")
 
-    # Configuración de yt-dlp
+    # Nombre de archivo único para evitar conflictos
+    file_id = str(uuid.uuid4())
+    filename = f"{file_id}.mp4" if tipo == 'video' else f"{file_id}.mp3"
+    filepath = os.path.join(DOWNLOAD_FOLDER, filename)
+
+    # Configuración yt-dlp para guardar en disco
     ydl_opts = {
+        'outtmpl': filepath, # Guardar en nuestra carpeta
         'quiet': True,
         'no_warnings': True,
-        'dump_single_json': True,
-        'extract_flat': False,
+        'format': 'bestaudio/best' if tipo == 'audio' else 'best[ext=mp4]/best',
         'nocheckcertificate': True,
         'geo_bypass': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
 
-    # Ajuste de formato según tipo
-    if tipo == 'audio':
-        ydl_opts['format'] = 'bestaudio/best'
-    else:
-        # Prioridad: MP4 con video+audio, si no, lo mejor disponible
-        ydl_opts['format'] = 'best[ext=mp4]/best'
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True) # download=True para guardar
             
-            # Si es una playlist o mix, tomamos el primero
-            if 'entries' in info:
-                info = info['entries'][0]
+            # Datos visuales
+            titulo = info.get('title', 'Wolf Media')
+            duracion = info.get('duration_string', '0:00')
+            imagen = info.get('thumbnail', '')
 
-            # INTENTO DE OBTENER URL DIRECTA
-            real_url = info.get('url')
-            
-            # Si 'url' está vacío (común en TikTok/YT), buscamos en 'requested_formats' o 'formats'
-            if not real_url:
-                if 'requested_formats' in info:
-                    real_url = info['requested_formats'][0]['url']
-                elif 'formats' in info:
-                    real_url = info['formats'][-1]['url'] # El último suele ser el mejor
-
-            if not real_url:
-                raise Exception("No se pudo extraer el enlace directo de descarga.")
+            # Construimos TU link propio
+            # request.host_url es "https://tu-api.railway.app/"
+            mi_link_seguro = f"{request.host_url}file/{filename}"
 
             return jsonify({
                 "status": True,
                 "resultado": {
-                    "titulo": info.get('title', 'Wolf Media'),
-                    "plataforma": info.get('extractor_key', 'Web'),
-                    "tipo": tipo,
-                    "duracion": info.get('duration_string', '0:00'),
-                    "imagen": info.get('thumbnail', ''),
-                    # IMPORTANTE: Enviamos el link real para que el bot lo use en el puente
-                    "descarga_original": real_url 
+                    "titulo": titulo,
+                    "duracion": duracion,
+                    "imagen": imagen,
+                    "descarga": mi_link_seguro # <--- ESTE ES EL LINK ORO
                 }
             })
 
@@ -81,34 +95,18 @@ def get_info():
         return jsonify({"status": False, "error": str(e)}), 500
 
 
-# --- ENDPOINT 2: EL TÚNEL / PUENTE (La Magia Anti-Bloqueo) ---
-@app.route('/stream', methods=['GET'])
-def stream_media():
-    file_url = request.args.get('url')
-    
-    if not file_url:
-        return "Falta parametro url", 400
-
+# --- ENDPOINT 2: ENTREGAR EL ARCHIVO ---
+@app.route('/file/<filename>')
+def get_file(filename):
     try:
-        # La API de Railway descarga el archivo (IP Limpia)
-        # stream=True es vital para no llenar la RAM del servidor
-        req = requests.get(file_url, stream=True, timeout=15)
-        
-        # Pasamos los headers correctos (como el Content-Type)
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        headers = [(name, value) for (name, value) in req.raw.headers.items()
-                   if name.lower() not in excluded_headers]
-
-        # Retransmitimos los datos al Bot "chorrito a chorrito" (chunks)
-        return Response(stream_with_context(req.iter_content(chunk_size=1024 * 8)),
-                        headers=headers,
-                        content_type=req.headers.get('content-type'))
-    
+        path = os.path.join(DOWNLOAD_FOLDER, filename)
+        if os.path.exists(path):
+            return send_file(path)
+        else:
+            return "Archivo expirado o no existe", 404
     except Exception as e:
-        print(f"❌ Error en Túnel: {str(e)}")
-        return "Error en el servidor proxy", 500
+        return str(e), 500
 
 if __name__ == '__main__':
-    # Puerto dinámico para Railway
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
