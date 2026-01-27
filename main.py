@@ -10,75 +10,96 @@ import yt_dlp
 app = Flask(__name__)
 CORS(app)
 
-# Carpeta temporal para guardar los videos
 DOWNLOAD_FOLDER = 'downloads'
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-print("🐺 WOLF API (STORAGE MODE): ONLINE...")
+print("🐺 WOLF API (YOUTUBE FIX): ONLINE...")
 
-# --- SISTEMA DE AUTO-LIMPIEZA (Borra archivos de más de 10 min) ---
+# --- LIMPIEZA AUTOMÁTICA ---
 def limpiar_basura():
     while True:
         try:
             now = time.time()
-            # Busca todos los archivos en la carpeta downloads
             files = glob.glob(os.path.join(DOWNLOAD_FOLDER, '*'))
             for f in files:
-                # Si el archivo tiene más de 600 segundos (10 min)
-                if os.stat(f).st_mtime < now - 600:
+                if os.stat(f).st_mtime < now - 600: # 10 minutos
                     os.remove(f)
-                    print(f"🗑️ Archivo borrado por vejez: {f}")
+                    print(f"🗑️ Limpiando: {f}")
         except Exception as e:
-            print(f"Error en limpieza: {e}")
-        time.sleep(600) # Revisa cada 10 minutos
+            print(f"Error limpieza: {e}")
+        time.sleep(600)
 
-# Iniciamos el basurero en segundo plano
 threading.Thread(target=limpiar_basura, daemon=True).start()
-
 
 @app.route('/')
 def home():
-    return "🐺 WOLF API: STORAGE SERVER READY."
+    return "🐺 WOLF API: YT ENGINE READY."
 
-# --- ENDPOINT 1: PROCESAR Y GUARDAR ---
 @app.route('/process', methods=['GET'])
 def process_media():
     url = request.args.get('url')
-    tipo = request.args.get('type', 'video') # 'video' o 'audio'
+    tipo = request.args.get('type', 'video')
     
     if not url: return jsonify({"status": False, "error": "Falta URL"}), 400
 
-    print(f"📥 Descargando localmente: {url}")
+    print(f"📥 Wolf procesando: {url}")
 
-    # Nombre de archivo único para evitar conflictos
     file_id = str(uuid.uuid4())
-    filename = f"{file_id}.mp4" if tipo == 'video' else f"{file_id}.mp3"
-    filepath = os.path.join(DOWNLOAD_FOLDER, filename)
+    # Si es video, forzamos contenedor mp4. Si es audio, mp3.
+    ext = 'mp4' if tipo == 'video' else 'mp3'
+    filename = f"{file_id}.{ext}"
+    filepath = os.path.join(DOWNLOAD_FOLDER, filename) # yt-dlp añade extensión a veces, ojo con esto
 
-    # Configuración yt-dlp para guardar en disco
+    # Configuración Avanzada para YouTube
     ydl_opts = {
-        'outtmpl': filepath, # Guardar en nuestra carpeta
+        # NOMBRE DEL ARCHIVO
+        'outtmpl': os.path.join(DOWNLOAD_FOLDER, f"{file_id}.%(ext)s"),
+        
+        # OPCIONES DE CALIDAD Y FFMPEG
+        # Si es video: Descarga lo mejor que sea mp4, o une video+audio y conviértelo a mp4
+        # Si es audio: Descarga el mejor audio y conviértelo a mp3
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best' if tipo == 'video' else 'bestaudio/best',
+        
+        # SI ES AUDIO, convertir a MP3
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }] if tipo == 'audio' else [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
+
+        # EVASIÓN DE BLOQUEOS
         'quiet': True,
         'no_warnings': True,
-        'format': 'bestaudio/best' if tipo == 'audio' else 'best[ext=mp4]/best',
         'nocheckcertificate': True,
         'geo_bypass': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        # Usamos un User Agent de iPhone para parecer un celular real
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True) # download=True para guardar
+            info = ydl.extract_info(url, download=True)
             
-            # Datos visuales
             titulo = info.get('title', 'Wolf Media')
             duracion = info.get('duration_string', '0:00')
             imagen = info.get('thumbnail', '')
+            
+            # yt-dlp puede cambiar la extensión final (ej: .mkv -> .mp4)
+            # Buscamos el archivo real que se creó con ese ID
+            patron = os.path.join(DOWNLOAD_FOLDER, f"{file_id}.*")
+            archivos_encontrados = glob.glob(patron)
+            
+            if not archivos_encontrados:
+                raise Exception("El archivo no aparece tras la descarga.")
+            
+            # Tomamos el nombre real del archivo generado
+            nombre_final = os.path.basename(archivos_encontrados[0])
 
-            # Construimos TU link propio
-            # request.host_url es "https://tu-api.railway.app/"
-            mi_link_seguro = f"{request.host_url}file/{filename}"
+            mi_link = f"{request.host_url}file/{nombre_final}"
 
             return jsonify({
                 "status": True,
@@ -86,16 +107,15 @@ def process_media():
                     "titulo": titulo,
                     "duracion": duracion,
                     "imagen": imagen,
-                    "descarga": mi_link_seguro # <--- ESTE ES EL LINK ORO
+                    "descarga": mi_link
                 }
             })
 
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return jsonify({"status": False, "error": str(e)}), 500
+        print(f"❌ Error Wolf: {str(e)}")
+        # YouTube a veces da error 403 o 'Sign in'. 
+        return jsonify({"status": False, "error": "Error de YouTube o Bloqueo de IP"}), 500
 
-
-# --- ENDPOINT 2: ENTREGAR EL ARCHIVO ---
 @app.route('/file/<filename>')
 def get_file(filename):
     try:
@@ -103,7 +123,7 @@ def get_file(filename):
         if os.path.exists(path):
             return send_file(path)
         else:
-            return "Archivo expirado o no existe", 404
+            return "Archivo expirado", 404
     except Exception as e:
         return str(e), 500
 
