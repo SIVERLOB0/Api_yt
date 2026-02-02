@@ -14,62 +14,55 @@ DOWNLOAD_FOLDER = 'downloads'
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-print("🐺 WOLF API (LITE VERSION): ONLINE...")
+print("🐺 WOLF API (TIKTOK FIX): ONLINE...")
 
-# --- LIMPIEZA AUTOMÁTICA ---
 def limpiar_basura():
     while True:
         try:
             now = time.time()
             files = glob.glob(os.path.join(DOWNLOAD_FOLDER, '*'))
             for f in files:
-                if os.stat(f).st_mtime < now - 600: # 10 minutos
+                if os.stat(f).st_mtime < now - 600: 
                     os.remove(f)
-                    print(f"🗑️ Limpiando: {f}")
-        except Exception as e:
-            print(f"Error limpieza: {e}")
+        except Exception:
+            pass
         time.sleep(600)
 
 threading.Thread(target=limpiar_basura, daemon=True).start()
 
 @app.route('/')
 def home():
-    return "🐺 WOLF API: LITE MODE READY."
+    return "🐺 WOLF API: ONLINE"
 
 @app.route('/process', methods=['GET'])
 def process_media():
     url = request.args.get('url')
-    tipo = request.args.get('type', 'video') # 'video' o 'audio'
+    tipo = request.args.get('type', 'video')
     
     if not url: return jsonify({"status": False, "error": "Falta URL"}), 400
 
-    print(f"📥 Wolf procesando: {url}")
-
+    print(f"📥 Procesando: {url}")
     file_id = str(uuid.uuid4())
     
-    # NOTA: Sin FFmpeg, no podemos forzar MP3. 
-    # Usaremos m4a para audio (muy compatible) y mp4 para video.
-    
-    # Configuración base
+    # AJUSTE PARA TIKTOK: User Agent de Android genérico suele funcionar mejor
     ydl_opts = {
         'outtmpl': os.path.join(DOWNLOAD_FOLDER, f"{file_id}.%(ext)s"),
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
         'geo_bypass': True,
-        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+        # Usamos un User Agent más genérico de Android
+        'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
     }
 
-    # LÓGICA SIN FFMPEG
+    # LÓGICA DE FORMATOS SIMPLIFICADA
     if tipo == 'video':
-        # best[ext=mp4]: Busca el mejor archivo ÚNICO que sea mp4.
-        # usually esto descarga 720p o 360p (tu "calidad 400").
-        # has_video+has_audio: Asegura que no baje solo video mudo.
-        ydl_opts['format'] = 'best[ext=mp4][has_audio]/best[ext=mp4]/best'
+        # "best" a secas es más seguro para TikTok. 
+        # Si pides "best[ext=mp4]" a veces falla si TikTok sirve .mov o .webm
+        ydl_opts['format'] = 'best'
     else:
-        # AUDIO: bestaudio[ext=m4a]. M4A es nativo de iPhone/Android.
-        # No intentamos convertir a MP3 para no usar CPU.
-        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
+        # Audio
+        ydl_opts['format'] = 'bestaudio/best'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -78,16 +71,17 @@ def process_media():
             titulo = info.get('title', 'Wolf Media')
             duracion = info.get('duration_string', '0:00')
             imagen = info.get('thumbnail', '')
-            
-            # Buscamos qué archivo se creó realmente
+            ext_final = info.get('ext', 'mp4') # Detectar extensión real
+
+            # Buscamos el archivo exacto creado
             patron = os.path.join(DOWNLOAD_FOLDER, f"{file_id}.*")
-            archivos_encontrados = glob.glob(patron)
+            archivos = glob.glob(patron)
             
-            if not archivos_encontrados:
-                raise Exception("El archivo no aparece tras la descarga.")
+            if not archivos:
+                raise Exception("Archivo no encontrado en disco tras descarga")
             
-            nombre_final = os.path.basename(archivos_encontrados[0])
-            mi_link = f"{request.host_url}file/{nombre_final}"
+            nombre_real = os.path.basename(archivos[0])
+            mi_link = f"{request.host_url}file/{nombre_real}"
 
             return jsonify({
                 "status": True,
@@ -96,20 +90,26 @@ def process_media():
                     "duracion": duracion,
                     "imagen": imagen,
                     "descarga": mi_link,
-                    "nota": "Modo Lite (Sin conversión)"
+                    "formato": ext_final
                 }
             })
 
     except Exception as e:
-        print(f"❌ Error Wolf: {str(e)}")
-        return jsonify({"status": False, "error": "Error al procesar"}), 500
+        error_msg = str(e)
+        print(f"❌ ERROR CRÍTICO: {error_msg}")
+        
+        # AHORA LA API TE DIRÁ EXACTAMENTE QUÉ PASÓ
+        return jsonify({
+            "status": False, 
+            "error": error_msg, # <--- Aquí veremos el error real
+            "code": 500
+        }), 500
 
 @app.route('/file/<filename>')
 def get_file(filename):
     try:
         path = os.path.join(DOWNLOAD_FOLDER, filename)
         if os.path.exists(path):
-            # Forzamos la descarga con el nombre correcto para el navegador
             return send_file(path, as_attachment=True)
         else:
             return "Archivo expirado", 404
