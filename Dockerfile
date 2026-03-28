@@ -19,4 +19,4 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # 5. Comando de arranque (Detecta el puerto de Railway automáticamente)
-CMD gunicorn server:app --bind 0.0.0.0:$PORT
+CMD gunicorn main:app --bind 0.0.0.0:$PORT
