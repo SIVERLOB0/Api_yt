@@ -1,120 +1,92 @@
-import os
-import uuid
-import time
-import threading
-import glob
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from flask import Flask, request, jsonify
 import yt_dlp
+import os
+import time
+import shutil
 
 app = Flask(__name__)
-CORS(app)
 
-DOWNLOAD_FOLDER = 'downloads'
-if not os.path.exists(DOWNLOAD_FOLDER):
-    os.makedirs(DOWNLOAD_FOLDER)
-
-print("🐺 WOLF API (TIKTOK FIX): ONLINE...")
+# Ruta temporal segura para servidores Linux (Railway)
+BASE_DIR = "/tmp/descargas_wolf"
+os.makedirs(BASE_DIR, exist_ok=True)
 
 def limpiar_basura():
-    while True:
-        try:
-            now = time.time()
-            files = glob.glob(os.path.join(DOWNLOAD_FOLDER, '*'))
-            for f in files:
-                if os.stat(f).st_mtime < now - 600: 
-                    os.remove(f)
-        except Exception:
-            pass
-        time.sleep(600)
+    """Protocolo de limpieza: elimina carpetas con más de 10 minutos de antigüedad"""
+    ahora = time.time()
+    for nombre_carpeta in os.listdir(BASE_DIR):
+        ruta_carpeta = os.path.join(BASE_DIR, nombre_carpeta)
+        if os.path.isdir(ruta_carpeta):
+            # Si la carpeta tiene más de 600 segundos (10 minutos)
+            if os.path.getctime(ruta_carpeta) < ahora - 600:
+                try:
+                    shutil.rmtree(ruta_carpeta)
+                except:
+                    pass
 
-threading.Thread(target=limpiar_basura, daemon=True).start()
-
-@app.route('/')
-def home():
-    return "🐺 WOLF API: ONLINE"
-
-@app.route('/process', methods=['GET'])
-def process_media():
-    url = request.args.get('url')
-    tipo = request.args.get('type', 'video')
+def procesar_descarga(link, tipo):
+    # Ejecutar limpieza antes de procesar una nueva orden
+    limpiar_basura()
     
-    if not url: return jsonify({"status": False, "error": "Falta URL"}), 400
+    if not link:
+        return {"status": "error", "mensaje": "Vector vacio. Usa el parametro ?link="}, 400
 
-    print(f"📥 Procesando: {url}")
-    file_id = str(uuid.uuid4())
+    # Limpieza del enlace y creación de ruta
+    link_base = link.split('?')[0]
+    link_limpio = ''.join(e for e in link_base.replace('https://', '').replace('http://', '') if e.isalnum() or e == '_')[:80]
     
-    # AJUSTE PARA TIKTOK: User Agent de Android genérico suele funcionar mejor
+    if not link_limpio:
+        link_limpio = f"descarga_{int(time.time())}"
+
+    ruta_destino = os.path.join(BASE_DIR, link_limpio)
+    os.makedirs(ruta_destino, exist_ok=True)
+
+    # Configuración de yt-dlp modo sigilo
     ydl_opts = {
-        'outtmpl': os.path.join(DOWNLOAD_FOLDER, f"{file_id}.%(ext)s"),
+        'outtmpl': f'{ruta_destino}/%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        # Usamos un User Agent más genérico de Android
-        'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
     }
 
-    # LÓGICA DE FORMATOS SIMPLIFICADA
-    if tipo == 'video':
-        # "best" a secas es más seguro para TikTok. 
-        # Si pides "best[ext=mp4]" a veces falla si TikTok sirve .mov o .webm
-        ydl_opts['format'] = 'best'
-    else:
-        # Audio
-        ydl_opts['format'] = 'bestaudio/best'
+    if tipo == 'audio':
+        ydl_opts['format'] = 'ba'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+        }]
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            ydl.download([link])
             
-            titulo = info.get('title', 'Wolf Media')
-            duracion = info.get('duration_string', '0:00')
-            imagen = info.get('thumbnail', '')
-            ext_final = info.get('ext', 'mp4') # Detectar extensión real
-
-            # Buscamos el archivo exacto creado
-            patron = os.path.join(DOWNLOAD_FOLDER, f"{file_id}.*")
-            archivos = glob.glob(patron)
-            
-            if not archivos:
-                raise Exception("Archivo no encontrado en disco tras descarga")
-            
-            nombre_real = os.path.basename(archivos[0])
-            mi_link = f"{request.host_url}file/{nombre_real}"
-
-            return jsonify({
-                "status": True,
-                "resultado": {
-                    "titulo": titulo,
-                    "duracion": duracion,
-                    "imagen": imagen,
-                    "descarga": mi_link,
-                    "formato": ext_final
-                }
-            })
+        return {
+            "status": "success",
+            "tipo": tipo,
+            "ruta": ruta_destino,
+            "mensaje": "Descarga exitosa. El archivo se auto-destruira en 10 minutos."
+        }, 200
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ ERROR CRÍTICO: {error_msg}")
-        
-        # AHORA LA API TE DIRÁ EXACTAMENTE QUÉ PASÓ
-        return jsonify({
-            "status": False, 
-            "error": error_msg, # <--- Aquí veremos el error real
-            "code": 500
-        }), 500
+        # Destruir evidencia si la descarga falla
+        if os.path.exists(ruta_destino):
+            shutil.rmtree(ruta_destino, ignore_errors=True)
+        return {"status": "error", "mensaje": f"Mision abortada. Error: {str(e)}"}, 500
 
-@app.route('/file/<filename>')
-def get_file(filename):
-    try:
-        path = os.path.join(DOWNLOAD_FOLDER, filename)
-        if os.path.exists(path):
-            return send_file(path, as_attachment=True)
-        else:
-            return "Archivo expirado", 404
-    except Exception as e:
-        return str(e), 500
+# --- ENDPOINTS ---
+@app.route('/api/video', methods=['GET'])
+def api_video():
+    link = request.args.get('link')
+    respuesta, codigo = procesar_descarga(link, 'video')
+    return jsonify(respuesta), codigo
+
+@app.route('/api/audio', methods=['GET'])
+def api_audio():
+    link = request.args.get('link')
+    respuesta, codigo = procesar_descarga(link, 'audio')
+    return jsonify(respuesta), codigo
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"status": "online", "sistema": "WOLFNET API v2.0"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
